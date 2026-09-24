@@ -1,27 +1,35 @@
-# FREE daily SMS reminders using GitHub Actions (no Firebase Blaze plan needed).
-# Setup: repo → Settings → Secrets and variables → Actions → New repository secret:
-#   FIREBASE_SERVICE_ACCOUNT  = the whole service-account JSON file content
-#   (optional, only if you resell SMS from your own Notify.lk account)
-#   NOTIFY_USER_ID, NOTIFY_API_KEY, NOTIFY_SENDER_ID
 name: Daily SMS reminders
+
 on:
   schedule:
-    - cron: '30 3 * * *'   # 03:30 UTC = 09:00 Sri Lanka time
-  workflow_dispatch: {}     # "Run workflow" button for a manual run
+    # 09:00 AM Sri Lanka time (UTC+5:30)
+    - cron: "30 3 * * *"
+
+  workflow_dispatch:
+
 jobs:
   remind:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with: { node-version: 22 }
-      - run: npm install --omit=dev --no-audit --no-fund
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
         working-directory: functions
-      - run: node run-once.js
+        run: npm install --omit=dev --no-audit --no-fund
+
+      - name: Run SMS reminders
         working-directory: functions
         env:
           FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
           NOTIFY_USER_ID: ${{ secrets.NOTIFY_USER_ID }}
           NOTIFY_API_KEY: ${{ secrets.NOTIFY_API_KEY }}
           NOTIFY_SENDER_ID: ${{ secrets.NOTIFY_SENDER_ID }}
+        run: node run-once.js
