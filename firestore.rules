@@ -1,0 +1,158 @@
+rules_version = '2';
+
+// =============================================================================
+// MOBILE DISTRIBUTOR PRO — SECURITY RULES
+// This file is what keeps every shop's data private from every other shop.
+// It is enforced by Google's servers, so it holds no matter what someone does in
+// the browser. Deploy with:  firebase deploy --only firestore:rules
+//
+// Data layout
+//   admins/{uid}                 ← you (the app seller). Create this doc by hand in the console.
+//   users/{uid}                  ← { shopId, role: 'owner' | 'staff', name, email, active }
+//   shops/{shopId}               ← shop profile + licence (status, plan, paidUntil). shopId = owner's uid
+//   shops/{shopId}/phones|accessories|customers|sales|payments|expenses|suppliers/{id}
+//   shops/{shopId}/private/sms   ← SMS settings + API key (owner only)
+//   shops/{shopId}/smsLog/{id}   ← written only by the reminder service
+// =============================================================================
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() { return request.auth != null; }
+    function uid() { return request.auth.uid; }
+    function userDoc(u) { return get(/databases/$(database)/documents/users/$(u)); }
+    function shopDoc(s) { return get(/databases/$(database)/documents/shops/$(s)); }
+    function isAdmin() { return signedIn() && exists(/databases/$(database)/documents/admins/$(uid())); }
+
+    // Member = signed in, has a user record pointing at this shop, and is not blocked.
+    function isMember(shopId) {
+      return signedIn()
+        && exists(/databases/$(database)/documents/users/$(uid()))
+        && userDoc(uid()).data.shopId == shopId
+        && userDoc(uid()).data.get('active', true) == true;
+    }
+    function isOwner(shopId) { return isMember(shopId) && shopId == uid() && userDoc(uid()).data.role == 'owner'; }
+
+    // Licence: writes are allowed only while the shop is active and paid (or in trial).
+    // Reads stay allowed after expiry so a shop can always see / export its own data.
+    function licensed(shopId) {
+      let s = shopDoc(shopId).data;
+      return s.status == 'active' && request.time < s.paidUntil;
+    }
+    function staffMayAddStock(shopId) {
+      return shopDoc(shopId).data.get('settings', {}).get('staffCanAddStock', false) == true;
+    }
+
+    // ---------------------------------------------------------------- admins
+    match /admins/{adminId} {
+      allow read: if signedIn() && uid() == adminId;
+      allow write: if false;                       // create by hand in the Firebase console
+    }
+
+    // ---------------------------------------------------------------- users
+    match /users/{userId} {
+      allow read: if signedIn() && (uid() == userId || resource.data.shopId == uid() || isAdmin());
+
+      allow create: if isAdmin() || signedIn() && (
+        // 1. a new owner registering their own shop (shopId = their own uid)
+        (uid() == userId
+          && request.resource.data.shopId == userId
+          && request.resource.data.role == 'owner'
+          && request.resource.data.active == true)
+        ||
+        // 2. an owner creating a staff login for their shop
+        (uid() != userId
+          && request.resource.data.shopId == uid()
+          && request.resource.data.role == 'staff'
+          && isOwner(uid()))
+      );
+
+      allow update: if isAdmin() || (signedIn() && (
+        // owner blocks / unblocks / renames their staff (cannot move them or promote them)
+        (uid() != userId && resource.data.shopId == uid()
+          && request.resource.data.shopId == resource.data.shopId
+          && request.resource.data.role == 'staff' && resource.data.role == 'staff')
+        ||
+        // anyone may change their own name, nothing else
+        (uid() == userId
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name']))
+      ));
+      allow delete: if isAdmin();
+    }
+
+    // ---------------------------------------------------------------- shops
+    match /shops/{shopId} {
+      allow read: if isMember(shopId) || isAdmin();
+
+      // Self sign-up: a trial of at most 15 days, cannot give itself a paid plan or platform SMS.
+      // (You, the admin, can create any shop from admin.html.)
+      allow create: if isAdmin() || signedIn() && uid() == shopId
+        && request.resource.data.ownerUid == uid()
+        && request.resource.data.status == 'active'
+        && request.resource.data.plan == 'trial'
+        && request.resource.data.smsPlatform == false
+        && request.resource.data.paidUntil is timestamp
+        && request.resource.data.paidUntil < request.time + duration.value(15, 'd');
+
+      // Owner edits name / settings; licence and system fields are admin-only.
+      allow update: if isAdmin() || (isOwner(shopId) && licensed(shopId)
+        && !request.resource.data.diff(resource.data).affectedKeys()
+             .hasAny(['status', 'plan', 'paidUntil', 'ownerUid', 'smsPlatform', 'smsLastRun', 'smsLastResult', 'smsOwnerDay', 'createdAt']));
+      allow delete: if isAdmin();
+
+      match /private/{docId} {
+        allow read, write: if isOwner(shopId) || isAdmin();
+      }
+      match /smsLog/{docId} {
+        allow read: if isOwner(shopId) || isAdmin();
+        allow write: if false;                     // only the reminder service (admin SDK) writes here
+      }
+
+      match /phones/{id} {
+        allow read: if isMember(shopId);
+        allow create: if isMember(shopId) && licensed(shopId) && (isOwner(shopId) || staffMayAddStock(shopId));
+        allow update: if isMember(shopId) && licensed(shopId)
+          // a phone can't be sold twice (second device's whole sale is rejected)
+          && !(resource.data.status == 'Sold' && request.resource.data.status == 'Sold'
+               && request.resource.data.get('saleId', null) != resource.data.get('saleId', null))
+          // only the owner can put a sold phone back into stock (cancel bill)
+          && (resource.data.status != 'Sold' || request.resource.data.status == 'Sold' || isOwner(shopId));
+        allow delete: if isOwner(shopId) && licensed(shopId) && resource.data.status != 'Sold';
+      }
+
+      match /sales/{id} {
+        allow read: if isMember(shopId);
+        allow create: if isMember(shopId) && licensed(shopId) && request.resource.data.byUid == uid();
+        allow update: if isMember(shopId) && licensed(shopId)
+          && (request.resource.data.status != 'cancelled' || resource.data.status == 'cancelled' || isOwner(shopId));
+        allow delete: if false;                    // bills are cancelled, never deleted
+      }
+
+      match /payments/{id} {
+        allow read: if isMember(shopId);
+        allow create: if isMember(shopId) && licensed(shopId) && request.resource.data.byUid == uid();
+        allow update, delete: if false;
+      }
+
+      match /customers/{id} {
+        allow read: if isMember(shopId);
+        allow create, update: if isMember(shopId) && licensed(shopId);
+        allow delete: if isOwner(shopId) && licensed(shopId);
+      }
+      match /accessories/{id} {
+        allow read: if isMember(shopId);
+        allow create: if isMember(shopId) && licensed(shopId) && (isOwner(shopId) || staffMayAddStock(shopId));
+        allow update: if isMember(shopId) && licensed(shopId);   // staff sell → quantity goes down
+        allow delete: if isOwner(shopId) && licensed(shopId);
+      }
+      match /suppliers/{id} {
+        allow read: if isMember(shopId);
+        allow create, update: if isMember(shopId) && licensed(shopId);
+        allow delete: if isOwner(shopId) && licensed(shopId);
+      }
+      match /expenses/{id} {
+        allow read: if isOwner(shopId);
+        allow create, update, delete: if isOwner(shopId) && licensed(shopId);
+      }
+    }
+  }
+}

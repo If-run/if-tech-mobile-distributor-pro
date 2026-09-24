@@ -1,0 +1,16 @@
+{
+  "name": "mdp-reminders",
+  "private": true,
+  "description": "Daily SMS reminders for Mobile Distributor Pro (Notify.lk)",
+  "main": "index.js",
+  "engines": { "node": "22" },
+  "scripts": {
+    "test": "node test-reminders.js",
+    "run-once": "node run-once.js",
+    "dry-run": "DRY_RUN=1 node run-once.js"
+  },
+  "dependencies": {
+    "firebase-admin": "^13.0.0",
+    "firebase-functions": "^6.0.0"
+  }
+}
