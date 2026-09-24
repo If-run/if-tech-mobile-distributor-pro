@@ -116,7 +116,15 @@ async function sendNotify(creds, to, text) {
  *      used only for shops where you (the app seller) switched on "platform SMS" in admin.html.
  */
 async function runReminders({ db, FieldValue, env = {}, dryRun = false, log = console.log, now = new Date() }) {
-  const shops = await db.collection('shops').where('smsEnabled', '==', true).get();
+  const shopsSnap = await db.collection('shops').get();
+
+const shops = {
+  docs: shopsSnap.docs.filter(doc => {
+    const data = doc.data();
+    return data.smsEnabled === true ||
+           data.settings?.smsEnabled === true;
+  })
+};
   const summary = { shops: 0, sent: 0, failed: 0, skipped: 0 };
   for (const shopDoc of shops.docs) {
     const shop = { id: shopDoc.id, ...shopDoc.data() };
