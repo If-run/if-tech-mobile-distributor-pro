@@ -1,16 +1,3 @@
-/* =========================================================================
-   SMS REMINDER ENGINE
-   Runs from GitHub Actions once a day.
-
-   Supports:
-   - Credit reminders
-   - Cheque reminders
-   - Overdue reminders
-   - Owner daily summary
-   - Shop-specific Notify.lk credentials
-   - Platform Notify.lk credentials from GitHub Secrets
-   ========================================================================= */
-
 const DEFAULTS = {
   daysBefore: 2,
   overdueEvery: 3,
@@ -29,22 +16,9 @@ const DEFAULTS = {
 const MAX_OVERDUE_DAYS = 90;
 
 
-/* =========================================================================
+/* ============================================================
    DATE HELPERS
-   ========================================================================= */
-
-function daysBetween(a, b) {
-  const [y1, m1, d1] = a.split('-').map(Number);
-  const [y2, m2, d2] = b.split('-').map(Number);
-
-  return Math.round(
-    (
-      Date.UTC(y2, m2 - 1, d2) -
-      Date.UTC(y1, m1 - 1, d1)
-    ) / 86400000
-  );
-}
-
+   ============================================================ */
 
 function todayIn(tz = 'Asia/Colombo', now = new Date()) {
   return new Intl.DateTimeFormat('en-CA', {
@@ -56,12 +30,77 @@ function todayIn(tz = 'Asia/Colombo', now = new Date()) {
 }
 
 
+function normalizeDate(value) {
+  if (!value) return null;
+
+  if (typeof value === 'string') {
+    const match = value.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+
+    if (match) {
+      return `${match[1]}-${String(match[2]).padStart(2, '0')}-${String(match[3]).padStart(2, '0')}`;
+    }
+
+    const d = new Date(value);
+
+    if (!Number.isNaN(d.getTime())) {
+      return todayIn('Asia/Colombo', d);
+    }
+
+    return null;
+  }
+
+  if (value instanceof Date) {
+    if (!Number.isNaN(value.getTime())) {
+      return todayIn('Asia/Colombo', value);
+    }
+  }
+
+  if (typeof value.toDate === 'function') {
+    return todayIn('Asia/Colombo', value.toDate());
+  }
+
+  if (typeof value.toMillis === 'function') {
+    return todayIn('Asia/Colombo', new Date(value.toMillis()));
+  }
+
+  if (typeof value === 'number') {
+    const d = new Date(value);
+
+    if (!Number.isNaN(d.getTime())) {
+      return todayIn('Asia/Colombo', d);
+    }
+  }
+
+  return null;
+}
+
+
+function daysBetween(a, b) {
+  const dateA = normalizeDate(a);
+  const dateB = normalizeDate(b);
+
+  if (!dateA || !dateB) return NaN;
+
+  const [y1, m1, d1] = dateA.split('-').map(Number);
+  const [y2, m2, d2] = dateB.split('-').map(Number);
+
+  return Math.round(
+    (
+      Date.UTC(y2, m2 - 1, d2) -
+      Date.UTC(y1, m1 - 1, d1)
+    ) / 86400000
+  );
+}
+
+
 function prettyDay(day) {
-  if (!day) return '';
+  const d = normalizeDate(day);
 
-  const [y, m, d] = day.split('-').map(Number);
+  if (!d) return '';
 
-  return `${d} ${
+  const [y, m, dd] = d.split('-').map(Number);
+
+  return `${dd} ${
     [
       'Jan',
       'Feb',
@@ -80,6 +119,10 @@ function prettyDay(day) {
 }
 
 
+/* ============================================================
+   MONEY
+   ============================================================ */
+
 function money(n, cur = 'Rs') {
   return (
     cur +
@@ -89,9 +132,9 @@ function money(n, cur = 'Rs') {
 }
 
 
-/* =========================================================================
+/* ============================================================
    PHONE
-   ========================================================================= */
+   ============================================================ */
 
 function intlPhone(p) {
   let d = String(p || '').replace(/\D/g, '');
@@ -111,23 +154,108 @@ function validLkMobile(p) {
 }
 
 
-/* =========================================================================
+/* ============================================================
    TEMPLATE
-   ========================================================================= */
+   ============================================================ */
 
-function fill(tpl, v) {
+function fill(tpl, values) {
   return String(tpl)
-    .replace(/\{(\w+)\}/g, (m, k) => {
-      return v[k] != null ? String(v[k]) : '';
+    .replace(/\{(\w+)\}/g, (match, key) => {
+      return values[key] != null
+        ? String(values[key])
+        : '';
     })
     .replace(/\s+/g, ' ')
     .trim();
 }
 
 
-/* =========================================================================
+/* ============================================================
+   NUMBER HELPERS
+   ============================================================ */
+
+function num(value) {
+  const n = Number(value);
+
+  return Number.isFinite(n) ? n : 0;
+}
+
+
+function firstPositive(...values) {
+  for (const value of values) {
+    const n = num(value);
+
+    if (n > 0) {
+      return n;
+    }
+  }
+
+  return 0;
+}
+
+
+/* ============================================================
+   GET OUTSTANDING AMOUNT
+
+   Supports different sales field names.
+   ============================================================ */
+
+function getOutstandingAmount(s) {
+
+  const direct = firstPositive(
+    s.due,
+    s.balanceDue,
+    s.amountDue,
+    s.outstanding,
+    s.balance,
+    s.remaining,
+    s.remainingAmount,
+    s.dueAmount,
+    s.amountOutstanding,
+    s.outstandingAmount
+  );
+
+  if (direct > 0) {
+    return direct;
+  }
+
+
+  const total = firstPositive(
+    s.total,
+    s.totalAmount,
+    s.grandTotal,
+    s.netTotal,
+    s.netAmount,
+    s.amount,
+    s.invoiceAmount
+  );
+
+
+  if (total > 0) {
+
+    const paid = num(
+      s.paid ??
+      s.paidAmount ??
+      s.amountPaid ??
+      s.received ??
+      s.receivedAmount
+    );
+
+    const balance = total - paid;
+
+    if (balance > 0) {
+      return balance;
+    }
+  }
+
+
+  return 0;
+}
+
+
+/* ============================================================
    PLAN REMINDERS
-   ========================================================================= */
+   ============================================================ */
 
 function planShop({
   shop,
@@ -136,18 +264,22 @@ function planShop({
   customers = {},
   today
 }) {
+
   const c = {
     ...DEFAULTS,
     ...(cfg || {})
   };
 
+
   const cur =
     shop.settings?.currency || 'Rs';
+
 
   const shopPhone =
     shop.settings?.phone ||
     shop.phone ||
     '';
+
 
   const messages = [];
   const skipped = [];
@@ -159,7 +291,6 @@ function planShop({
 
   for (const s of sales) {
 
-    /* Ignore closed/cancelled sales */
     if (
       s.open !== true ||
       String(s.status || '').toLowerCase() === 'cancelled'
@@ -170,6 +301,7 @@ function planShop({
 
     const customer =
       customers[s.customerId] || {};
+
 
     const phone = intlPhone(
       customer.phone ||
@@ -182,6 +314,7 @@ function planShop({
     const status =
       String(s.status || '').toLowerCase();
 
+
     const chequeStatus =
       String(
         s.chequeStatus ||
@@ -189,19 +322,8 @@ function planShop({
       ).toLowerCase();
 
 
-    /* ================================================================
-       OUTSTANDING AMOUNT
-
-       Support the different field names your sales records may use.
-       ================================================================ */
-
-    const dueAmount = Number(
-      s.due ??
-      s.balanceDue ??
-      s.amountDue ??
-      s.outstanding ??
-      0
-    );
+    const dueAmount =
+      getOutstandingAmount(s);
 
 
     const isCheque =
@@ -210,7 +332,16 @@ function planShop({
       Boolean(s.chequeDate);
 
 
+    const dueDate =
+      normalizeDate(s.dueDate);
+
+
+    const chequeDate =
+      normalizeDate(s.chequeDate);
+
+
     const vars = {
+
       customer:
         s.customerName ||
         customer.name ||
@@ -226,25 +357,20 @@ function planShop({
         s.invoiceNo ||
         s.invoice ||
         s.billNo ||
+        s.id ||
         '',
 
       due_date:
-        prettyDay(
-          s.dueDate
-        ),
+        prettyDay(dueDate),
 
       cheque_date:
-        prettyDay(
-          s.chequeDate
-        ),
+        prettyDay(chequeDate),
 
       cheque_no:
-        s.chequeNo ||
-        '',
+        s.chequeNo || '',
 
       bank:
-        s.bank ||
-        '',
+        s.bank || '',
 
       shop_phone:
         shopPhone,
@@ -258,57 +384,56 @@ function planShop({
     let tpl = null;
 
 
-    /* ================================================================
-       CREDIT / CUSTOMER BALANCE
-
-       IMPORTANT:
-       We do NOT require status === "due".
-
-       Any open non-cheque sale with:
-       - due date
-       - positive outstanding amount
-
-       can generate a reminder.
-       ================================================================ */
+    /* ========================================================
+       CREDIT
+       ======================================================== */
 
     if (
       !isCheque &&
-      s.dueDate &&
+      dueDate &&
       dueAmount > 0
     ) {
 
       const d =
         daysBetween(
           today,
-          s.dueDate
+          dueDate
         );
 
 
-      /* Due today or within configured days */
+      /* Due today / before due date */
+
       if (
+        Number.isFinite(d) &&
         d >= 0 &&
         d <= Number(c.daysBefore)
       ) {
 
         key =
-          `c:${s.dueDate}:${d}`;
+          `c:${dueDate}:${d}`;
 
         tpl =
           c.tplCredit;
+
 
         dueSoon.push({
           s,
           d,
           amount: dueAmount
         });
-
       }
 
+
       /* Overdue */
-      else if (d < 0) {
+
+      else if (
+        Number.isFinite(d) &&
+        d < 0
+      ) {
 
         const late =
           Math.abs(d);
+
 
         overdue.push({
           s,
@@ -316,7 +441,9 @@ function planShop({
           amount: dueAmount
         });
 
-        vars.days = late;
+
+        vars.days =
+          late;
 
 
         if (
@@ -326,7 +453,7 @@ function planShop({
         ) {
 
           key =
-            `o:${s.dueDate}:${late}`;
+            `o:${dueDate}:${late}`;
 
           tpl =
             c.tplOverdue;
@@ -335,23 +462,24 @@ function planShop({
     }
 
 
-    /* ================================================================
+    /* ========================================================
        CHEQUE
-       ================================================================ */
+       ======================================================== */
 
     if (
       isCheque &&
-      s.chequeDate
+      chequeDate
     ) {
 
       const d =
         daysBetween(
           today,
-          s.chequeDate
+          chequeDate
         );
 
 
       if (
+        Number.isFinite(d) &&
         d <= Number(c.daysBefore)
       ) {
 
@@ -365,12 +493,13 @@ function planShop({
 
       if (
         chequeStatus === 'pending' &&
+        Number.isFinite(d) &&
         d >= 0 &&
         d <= Number(c.daysBefore)
       ) {
 
         key =
-          `q:${s.chequeDate}:${d}`;
+          `q:${chequeDate}:${d}`;
 
         tpl =
           c.tplCheque;
@@ -378,16 +507,13 @@ function planShop({
     }
 
 
-    /* No reminder required */
-    if (
-      !key ||
-      !tpl
-    ) {
+    if (!key || !tpl) {
       continue;
     }
 
 
     /* Already sent */
+
     if (
       Array.isArray(s.reminderKeys) &&
       s.reminderKeys.includes(key)
@@ -396,13 +522,12 @@ function planShop({
     }
 
 
-    /* Invalid customer phone */
-    if (
-      !validLkMobile(phone)
-    ) {
+    /* Invalid mobile */
+
+    if (!validLkMobile(phone)) {
 
       skipped.push(
-        `${s.invoiceNo || s.invoice || s.id}: no valid mobile number`
+        `${s.invoiceNo || s.invoice || s.id || 'sale'}: no valid mobile number`
       );
 
       continue;
@@ -410,23 +535,27 @@ function planShop({
 
 
     messages.push({
-      saleId: s.id,
+
+      saleId:
+        s.id,
 
       key,
 
-      to: phone,
+      to:
+        phone,
 
-      text: fill(
-        tpl,
-        vars
-      ).slice(0, 621)
+      text:
+        fill(
+          tpl,
+          vars
+        ).slice(0, 621)
     });
   }
 
 
-  /* =========================================================================
-     OWNER DAILY SUMMARY
-     ========================================================================= */
+  /* ============================================================
+     OWNER SUMMARY
+     ============================================================ */
 
   let ownerText = null;
 
@@ -445,7 +574,6 @@ function planShop({
     ];
 
 
-    /* DUE */
     if (dueSoon.length) {
 
       dueSoon.sort(
@@ -456,46 +584,46 @@ function planShop({
       L.push(
         'DUE: ' +
         dueSoon
-          .map(({ s, d, amount }) => {
+          .map(
+            ({ s, d, amount }) => {
 
-            let when;
+              let when;
 
-            if (d === 0) {
-              when = 'today';
-            } else if (d === 1) {
-              when = 'tomorrow';
-            } else {
-              when =
-                prettyDay(
-                  s.dueDate
-                );
+              if (d === 0) {
+                when = 'today';
+              } else if (d === 1) {
+                when = 'tomorrow';
+              } else {
+                when =
+                  prettyDay(
+                    s.dueDate
+                  );
+              }
+
+
+              return `${
+                s.customerName ||
+                'Customer'
+              } ${
+                money(
+                  amount,
+                  cur
+                )
+              } (${when})`;
             }
-
-            return `${
-              s.customerName ||
-              'Customer'
-            } ${
-              money(
-                amount,
-                cur
-              )
-            } (${when})`;
-          })
+          )
           .join('; ')
       );
     }
 
 
-    /* OVERDUE */
     if (overdue.length) {
 
       const overdueTotal =
         overdue.reduce(
           (total, item) =>
             total +
-            Number(
-              item.amount || 0
-            ),
+            Number(item.amount || 0),
           0
         );
 
@@ -517,7 +645,6 @@ function planShop({
     }
 
 
-    /* CHEQUES */
     if (cheques.length) {
 
       cheques.sort(
@@ -538,20 +665,18 @@ function planShop({
               let when;
 
               if (d < 0) {
-                when =
-                  'deposit now';
+                when = 'deposit now';
               } else if (d === 0) {
-                when =
-                  'deposit today';
+                when = 'deposit today';
               } else if (d === 1) {
-                when =
-                  'tomorrow';
+                when = 'tomorrow';
               } else {
                 when =
                   prettyDay(
                     s.chequeDate
                   );
               }
+
 
               return `${
                 s.customerName ||
@@ -594,9 +719,9 @@ function planShop({
 }
 
 
-/* =========================================================================
+/* ============================================================
    SEND SMS
-   ========================================================================= */
+   ============================================================ */
 
 async function sendNotify(
   creds,
@@ -606,6 +731,7 @@ async function sendNotify(
 
   const params =
     new URLSearchParams({
+
       user_id:
         creds.userId,
 
@@ -694,9 +820,9 @@ async function sendNotify(
 }
 
 
-/* =========================================================================
-   MAIN REMINDER RUNNER
-   ========================================================================= */
+/* ============================================================
+   MAIN
+   ============================================================ */
 
 async function runReminders({
   db,
@@ -707,24 +833,11 @@ async function runReminders({
   now = new Date()
 }) {
 
-  log(
-    '========================================'
-  );
+  log('========================================');
+  log('Starting SMS reminder scan...');
+  log(`Time: ${now.toISOString()}`);
+  log('========================================');
 
-  log(
-    'Starting SMS reminder scan...'
-  );
-
-  log(
-    `Time: ${now.toISOString()}`
-  );
-
-  log(
-    '========================================'
-  );
-
-
-  /* GET ALL SHOPS */
 
   const shopsSnap =
     await db
@@ -737,14 +850,13 @@ async function runReminders({
   );
 
 
-  /* CHECK SMS ENABLED */
-
   const shops =
     shopsSnap.docs.filter(
       doc => {
 
         const data =
           doc.data();
+
 
         const enabled =
           data.smsEnabled === true ||
@@ -795,13 +907,17 @@ async function runReminders({
     );
 
 
-    /* LICENSE */
+    /* ========================================================
+       LICENSE
+       ======================================================== */
 
     const paidUntil =
       shop.paidUntil &&
       typeof shop.paidUntil.toMillis === 'function'
         ? shop.paidUntil.toMillis()
-        : 0;
+        : shop.paidUntil
+          ? new Date(shop.paidUntil).getTime()
+          : 0;
 
 
     if (
@@ -848,7 +964,9 @@ async function runReminders({
     }
 
 
-    /* SMS CONFIG */
+    /* ========================================================
+       SMS CONFIG
+       ======================================================== */
 
     const cfgSnap =
       await shopDoc.ref
@@ -863,41 +981,29 @@ async function runReminders({
         : {};
 
 
-    if (!cfgSnap.exists) {
-
-      log(
-        `skip ${
-          shop.name
-        }: private/sms document missing`
-      );
-
-      continue;
-    }
-
-
     if (
+      !cfgSnap.exists ||
       cfg.enabled !== true
     ) {
 
       log(
         `skip ${
           shop.name
-        }: private/sms enabled is not true`
+        }: private/sms missing or disabled`
       );
 
       continue;
     }
 
 
-    /* ================================================================
-       SMS CREDENTIALS
-
-       1. Shop-specific Notify.lk account
-       2. Platform Notify.lk account from GitHub Secrets
-       ================================================================ */
+    /* ========================================================
+       CREDENTIALS
+       ======================================================== */
 
     let creds = null;
 
+
+    /* Shop account */
 
     if (
       cfg.userId &&
@@ -920,12 +1026,15 @@ async function runReminders({
 
 
       log(
-        `${
-          shop.name
-        }: using shop SMS account`
+        `${shop.name}: using shop SMS account`
       );
 
-    } else if (
+    }
+
+
+    /* Platform account */
+
+    else if (
       env.NOTIFY_USER_ID &&
       env.NOTIFY_API_KEY
     ) {
@@ -946,12 +1055,13 @@ async function runReminders({
 
 
       log(
-        `${
-          shop.name
-        }: using platform SMS account`
+        `${shop.name}: using platform SMS account`
       );
 
-    } else {
+    }
+
+
+    else {
 
       log(
         `skip ${
@@ -966,7 +1076,9 @@ async function runReminders({
     summary.shops++;
 
 
-    /* TODAY */
+    /* ========================================================
+       TODAY
+       ======================================================== */
 
     const today =
       todayIn(
@@ -977,15 +1089,13 @@ async function runReminders({
 
 
     log(
-      `${
-        shop.name
-      }: processing date ${
-        today
-      }`
+      `${shop.name}: processing date ${today}`
     );
 
 
-    /* SALES */
+    /* ========================================================
+       SALES
+       ======================================================== */
 
     const salesSnap =
       await shopDoc.ref
@@ -1010,15 +1120,13 @@ async function runReminders({
 
 
     log(
-      `${
-        shop.name
-      }: ${
-        sales.length
-      } open sales found`
+      `${shop.name}: ${sales.length} open sales found`
     );
 
 
-    /* CUSTOMERS */
+    /* ========================================================
+       CUSTOMERS
+       ======================================================== */
 
     const custIds =
       [
@@ -1051,9 +1159,7 @@ async function runReminders({
           .map(
             id =>
               shopDoc.ref
-                .collection(
-                  'customers'
-                )
+                .collection('customers')
                 .doc(id)
           );
 
@@ -1077,7 +1183,9 @@ async function runReminders({
     }
 
 
-    /* PLAN */
+    /* ========================================================
+       PLAN
+       ======================================================== */
 
     const plan =
       planShop({
@@ -1090,38 +1198,80 @@ async function runReminders({
 
 
     log(
-      `${
-        shop.name
-      }: ${
+      `${shop.name}: ${
         plan.messages.length
       } customer SMS planned`
     );
+
+
+    /* ========================================================
+       IMPORTANT DIAGNOSTICS
+       ======================================================== */
+
+    if (
+      plan.messages.length === 0
+    ) {
+
+      sales.forEach(
+        s => {
+
+          const amount =
+            getOutstandingAmount(s);
+
+
+          const due =
+            normalizeDate(
+              s.dueDate
+            );
+
+
+          const customer =
+            customers[
+              s.customerId
+            ] || {};
+
+
+          const phone =
+            intlPhone(
+              customer.phone ||
+              s.customerPhone ||
+              s.phone ||
+              ''
+            );
+
+
+          log(
+            `${shop.name}: NOT PLANNED | ` +
+            `invoice=${s.invoiceNo || s.invoice || s.billNo || s.id} | ` +
+            `due=${due || 'MISSING'} | ` +
+            `amount=${amount} | ` +
+            `phone=${phone || 'MISSING'} | ` +
+            `customerId=${s.customerId || 'MISSING'}`
+          );
+        }
+      );
+    }
 
 
     summary.skipped +=
       plan.skipped.length;
 
 
-    if (
-      plan.skipped.length
-    ) {
+    plan.skipped.forEach(
+      x =>
+        log(
+          `${shop.name}: skipped ${x}`
+        )
+    );
 
-      plan.skipped.forEach(
-        x =>
-          log(
-            `${
-              shop.name
-            }: skipped ${x}`
-          )
-      );
-    }
 
+    /* ========================================================
+       CUSTOMER SMS
+       ======================================================== */
 
     let sent = 0;
     let failed = 0;
 
-
-    /* CUSTOMER SMS */
 
     for (
       const m of plan.messages
@@ -1230,9 +1380,9 @@ async function runReminders({
     }
 
 
-    /* ================================================================
-       OWNER PHONE
-       ================================================================ */
+    /* ========================================================
+       OWNER ALERT
+       ======================================================== */
 
     const ownerTo =
       intlPhone(
@@ -1241,8 +1391,6 @@ async function runReminders({
         shop.phone
       );
 
-
-    /* OWNER DAILY SUMMARY */
 
     if (
       plan.ownerText &&
@@ -1326,7 +1474,9 @@ async function runReminders({
     }
 
 
-    /* SAVE RESULT */
+    /* ========================================================
+       SAVE RESULT
+       ======================================================== */
 
     if (!dryRun) {
 
@@ -1362,6 +1512,7 @@ async function runReminders({
     '========================================'
   );
 
+
   log(
     `Done: ${
       summary.shops
@@ -1374,6 +1525,7 @@ async function runReminders({
     } skipped`
   );
 
+
   log(
     '========================================'
   );
@@ -1383,9 +1535,9 @@ async function runReminders({
 }
 
 
-/* =========================================================================
+/* ============================================================
    EXPORTS
-   ========================================================================= */
+   ============================================================ */
 
 module.exports = {
   planShop,
