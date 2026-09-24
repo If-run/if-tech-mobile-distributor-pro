@@ -1,16 +1,14 @@
 /* =========================================================================
    SMS REMINDER ENGINE
-   Runs from GitHub Actions / cloud once a day.
+   Runs from GitHub Actions once a day.
 
-   For every active shop that has reminders enabled:
-     • Credit customers → SMS from N days before due date, daily until due
-       date, then every X days while overdue.
-     • Cheque customers → SMS from N days before cheque date.
-     • Shop owner → one daily alert with due/overdue/cheque information.
-
-   SMS credentials:
-     • Shop-specific credentials are used when available.
-     • Otherwise GitHub platform credentials are used.
+   Supports:
+   - Credit reminders
+   - Cheque reminders
+   - Overdue reminders
+   - Owner daily summary
+   - Shop-specific Notify.lk credentials
+   - Platform Notify.lk credentials from GitHub Secrets
    ========================================================================= */
 
 const DEFAULTS = {
@@ -31,16 +29,17 @@ const DEFAULTS = {
 const MAX_OVERDUE_DAYS = 90;
 
 
-/* -------------------------------------------------------------------------
+/* =========================================================================
    DATE HELPERS
-   ------------------------------------------------------------------------- */
+   ========================================================================= */
 
 function daysBetween(a, b) {
   const [y1, m1, d1] = a.split('-').map(Number);
   const [y2, m2, d2] = b.split('-').map(Number);
 
   return Math.round(
-    (Date.UTC(y2, m2 - 1, d2) - Date.UTC(y1, m1 - 1, d1)) / 86400000
+    (Date.UTC(y2, m2 - 1, d2) -
+      Date.UTC(y1, m1 - 1, d1)) / 86400000
   );
 }
 
@@ -88,9 +87,9 @@ function money(n, cur = 'Rs') {
 }
 
 
-/* -------------------------------------------------------------------------
-   PHONE HELPERS
-   ------------------------------------------------------------------------- */
+/* =========================================================================
+   PHONE
+   ========================================================================= */
 
 function intlPhone(p) {
   let d = String(p || '').replace(/\D/g, '');
@@ -110,14 +109,18 @@ function validLkMobile(p) {
 }
 
 
-/* -------------------------------------------------------------------------
+/* =========================================================================
    TEMPLATE
-   ------------------------------------------------------------------------- */
+   ========================================================================= */
 
 function fill(tpl, v) {
   return String(tpl)
-    .replace(/\{(\w+)\}/g, (m, k) =>
-      v[k] != null ? String(v[k]) : ''
+    .replace(
+      /\{(\w+)\}/g,
+      (m, k) =>
+        v[k] != null
+          ? String(v[k])
+          : ''
     )
     .replace(/\s+/g, ' ')
     .trim();
@@ -125,7 +128,7 @@ function fill(tpl, v) {
 
 
 /* =========================================================================
-   PLAN REMINDERS FOR ONE SHOP
+   PLAN REMINDERS
    ========================================================================= */
 
 function planShop({
@@ -141,10 +144,10 @@ function planShop({
   };
 
   const cur =
-    (shop.settings && shop.settings.currency) || 'Rs';
+    shop.settings?.currency || 'Rs';
 
   const shopPhone =
-    (shop.settings && shop.settings.phone) || '';
+    shop.settings?.phone || '';
 
   const messages = [];
   const skipped = [];
@@ -156,14 +159,16 @@ function planShop({
 
   for (const s of sales) {
 
-    if (!s.open || s.status === 'cancelled') {
+    if (
+      !s.open ||
+      s.status === 'cancelled'
+    ) {
       continue;
     }
 
 
     const phone = intlPhone(
-      (customers[s.customerId] &&
-        customers[s.customerId].phone) ||
+      customers[s.customerId]?.phone ||
       s.customerPhone
     );
 
@@ -174,22 +179,38 @@ function planShop({
 
 
     const vars = {
-      customer: s.customerName || 'Customer',
-      shop: shop.name || '',
-      amount: money(s.due, cur),
-      invoice: s.invoiceNo || '',
-      due_date: prettyDay(s.dueDate),
-      cheque_date: prettyDay(s.chequeDate),
-      cheque_no: s.chequeNo || '',
-      bank: s.bank || '',
-      shop_phone: shopPhone,
+      customer:
+        s.customerName || 'Customer',
+
+      shop:
+        shop.name || '',
+
+      amount:
+        money(s.due, cur),
+
+      invoice:
+        s.invoiceNo || '',
+
+      due_date:
+        prettyDay(s.dueDate),
+
+      cheque_date:
+        prettyDay(s.chequeDate),
+
+      cheque_no:
+        s.chequeNo || '',
+
+      bank:
+        s.bank || '',
+
+      shop_phone:
+        shopPhone,
+
       days: ''
     };
 
 
-    /* ---------------------------------------------------------------
-       CREDIT CUSTOMER
-       --------------------------------------------------------------- */
+    /* CREDIT */
 
     if (
       s.status === 'due' &&
@@ -197,29 +218,29 @@ function planShop({
       (s.due || 0) > 0
     ) {
 
-      d = daysBetween(today, s.dueDate);
+      d = daysBetween(
+        today,
+        s.dueDate
+      );
 
-
-      /* Due in 2 days / 1 day / today */
 
       if (
         d >= 0 &&
         d <= c.daysBefore
       ) {
 
-        key = `c:${s.dueDate}:${d}`;
-        tpl = c.tplCredit;
+        key =
+          `c:${s.dueDate}:${d}`;
+
+        tpl =
+          c.tplCredit;
 
         dueSoon.push({
           s,
           d
         });
-      }
 
-
-      /* Already overdue */
-
-      else if (d < 0) {
+      } else if (d < 0) {
 
         overdue.push({
           s,
@@ -237,18 +258,18 @@ function planShop({
           late <= MAX_OVERDUE_DAYS
         ) {
 
-          key = `o:${s.dueDate}:${late}`;
-          tpl = c.tplOverdue;
+          key =
+            `o:${s.dueDate}:${late}`;
+
+          tpl =
+            c.tplOverdue;
         }
       }
-    }
 
 
-    /* ---------------------------------------------------------------
-       CHEQUE CUSTOMER
-       --------------------------------------------------------------- */
+    /* CHEQUE */
 
-    else if (
+    } else if (
       s.status === 'cheque' &&
       s.chequeDate
     ) {
@@ -259,7 +280,9 @@ function planShop({
       );
 
 
-      if (d <= c.daysBefore) {
+      if (
+        d <= c.daysBefore
+      ) {
 
         cheques.push({
           s,
@@ -274,8 +297,11 @@ function planShop({
         d <= c.daysBefore
       ) {
 
-        key = `q:${s.chequeDate}:${d}`;
-        tpl = c.tplCheque;
+        key =
+          `q:${s.chequeDate}:${d}`;
+
+        tpl =
+          c.tplCheque;
       }
     }
 
@@ -285,21 +311,18 @@ function planShop({
     }
 
 
-    /* Don't send the same reminder twice */
-
     if (
-      (s.reminderKeys || []).includes(key)
+      (s.reminderKeys || [])
+        .includes(key)
     ) {
       continue;
     }
 
 
-    /* Check customer phone */
-
     if (!validLkMobile(phone)) {
 
       skipped.push(
-        `${s.invoiceNo}: no valid mobile number`
+        `${s.invoiceNo || s.id}: no valid mobile number`
       );
 
       continue;
@@ -310,14 +333,15 @@ function planShop({
       saleId: s.id,
       key,
       to: phone,
-      text: fill(tpl, vars).slice(0, 621)
+      text: fill(
+        tpl,
+        vars
+      ).slice(0, 621)
     });
   }
 
 
-  /* ---------------------------------------------------------------------
-     OWNER DAILY SUMMARY
-     --------------------------------------------------------------------- */
+  /* OWNER SUMMARY */
 
   let ownerText = null;
 
@@ -355,7 +379,9 @@ function planShop({
                 ? 'today'
                 : d === 1
                 ? 'tomorrow'
-                : prettyDay(s.dueDate).slice(0, -5)
+                : prettyDay(
+                    s.dueDate
+                  ).slice(0, -5)
             })`
           )
           .join('; ')
@@ -366,8 +392,12 @@ function planShop({
     if (overdue.length) {
 
       L.push(
-        `OVERDUE: ${overdue.length} bill${
-          overdue.length > 1 ? 's' : ''
+        `OVERDUE: ${
+          overdue.length
+        } bill${
+          overdue.length > 1
+            ? 's'
+            : ''
         } ${money(
           overdue.reduce(
             (a, x) =>
@@ -411,10 +441,13 @@ function planShop({
     }
 
 
-    ownerText = L.join('\n');
+    ownerText =
+      L.join('\n');
 
 
-    if (ownerText.length > 600) {
+    if (
+      ownerText.length > 600
+    ) {
 
       ownerText =
         ownerText.slice(0, 590) +
@@ -432,7 +465,7 @@ function planShop({
 
 
 /* =========================================================================
-   SEND SMS THROUGH NOTIFY.LK
+   SEND SMS
    ========================================================================= */
 
 async function sendNotify(
@@ -441,27 +474,32 @@ async function sendNotify(
   text
 ) {
 
-  const params = new URLSearchParams({
-    user_id: creds.userId,
-    api_key: creds.apiKey,
-    sender_id:
-      creds.senderId || 'NotifyDEMO',
-    to,
-    message: text
-  });
+  const params =
+    new URLSearchParams({
+      user_id: creds.userId,
+      api_key: creds.apiKey,
+      sender_id:
+        creds.senderId ||
+        'NotifyDEMO',
+      to,
+      message: text
+    });
 
 
-  /* Sinhala / Tamil / Unicode SMS */
-
-  if (/[^\x00-\x7F]/.test(text)) {
-    params.set('type', 'unicode');
+  if (
+    /[^\x00-\x7F]/.test(text)
+  ) {
+    params.set(
+      'type',
+      'unicode'
+    );
   }
 
 
   const ctrl =
     new AbortController();
 
-  const t =
+  const timer =
     setTimeout(
       () => ctrl.abort(),
       15000
@@ -470,51 +508,54 @@ async function sendNotify(
 
   try {
 
-    const r = await fetch(
-      'https://app.notify.lk/api/v1/send',
-      {
-        method: 'POST',
-        body: params,
-        signal: ctrl.signal
-      }
-    );
-
-
-    const j =
-      await r.json().catch(
-        () => ({})
+    const response =
+      await fetch(
+        'https://app.notify.lk/api/v1/send',
+        {
+          method: 'POST',
+          body: params,
+          signal: ctrl.signal
+        }
       );
 
 
-    return j.status === 'success'
+    const result =
+      await response
+        .json()
+        .catch(() => ({}));
+
+
+    return result.status === 'success'
       ? { ok: true }
       : {
           ok: false,
-          error: JSON.stringify(
-            j.errors ||
-            j.message ||
-            j
-          ).slice(0, 200)
+          error:
+            JSON.stringify(
+              result.errors ||
+              result.message ||
+              result
+            ).slice(0, 300)
         };
 
-  } catch (e) {
+  } catch (error) {
 
     return {
       ok: false,
-      error: String(
-        e.message || e
-      )
+      error:
+        String(
+          error.message || error
+        )
     };
 
   } finally {
 
-    clearTimeout(t);
+    clearTimeout(timer);
   }
 }
 
 
 /* =========================================================================
-   RUN REMINDERS FOR ALL SHOPS
+   MAIN REMINDER RUNNER
    ========================================================================= */
 
 async function runReminders({
@@ -526,10 +567,12 @@ async function runReminders({
   now = new Date()
 }) {
 
+  console.log(
+    'Starting SMS reminder scan...'
+  );
 
-  /* ---------------------------------------------------------------------
-     GET ALL SHOPS
-     --------------------------------------------------------------------- */
+
+  /* Get ALL shops */
 
   const shopsSnap =
     await db
@@ -537,23 +580,36 @@ async function runReminders({
       .get();
 
 
-  /* ---------------------------------------------------------------------
-     ONLY SHOPS WITH SMS ENABLED
-     --------------------------------------------------------------------- */
+  console.log(
+    `Found ${shopsSnap.size} shop documents.`
+  );
 
-  const shops = {
-    docs: shopsSnap.docs.filter(
+
+  /* Check SMS enabled in either location */
+
+  const shops =
+    shopsSnap.docs.filter(
       doc => {
 
-        const data = doc.data();
+        const data =
+          doc.data();
 
-        return (
+        const enabled =
           data.smsEnabled === true ||
-          data.settings?.smsEnabled === true
-        );
+          data.settings?.smsEnabled === true;
+
+
+        if (!enabled) {
+
+          log(
+            `skip ${data.name || doc.id}: SMS disabled`
+          );
+        }
+
+
+        return enabled;
       }
-    )
-  };
+    );
 
 
   const summary = {
@@ -564,11 +620,7 @@ async function runReminders({
   };
 
 
-  /* ---------------------------------------------------------------------
-     PROCESS EACH SHOP
-     --------------------------------------------------------------------- */
-
-  for (const shopDoc of shops.docs) {
+  for (const shopDoc of shops) {
 
     const shop = {
       id: shopDoc.id,
@@ -576,9 +628,14 @@ async function runReminders({
     };
 
 
-    /* ---------------------------------------------------------------
-       CHECK LICENCE
-       --------------------------------------------------------------- */
+    log(
+      `Checking shop: ${
+        shop.name || shop.id
+      }`
+    );
+
+
+    /* LICENSE */
 
     const paidUntil =
       shop.paidUntil &&
@@ -588,21 +645,44 @@ async function runReminders({
 
 
     if (
-      shop.status !== 'active' ||
-      paidUntil < now.getTime()
+      shop.status !== 'active'
     ) {
 
       log(
-        `skip ${shop.name}: licence not active`
+        `skip ${shop.name}: status is ${
+          shop.status || 'missing'
+        }`
       );
 
       continue;
     }
 
 
-    /* ---------------------------------------------------------------
-       GET SMS CONFIG
-       --------------------------------------------------------------- */
+    if (
+      !paidUntil
+    ) {
+
+      log(
+        `skip ${shop.name}: paidUntil missing`
+      );
+
+      continue;
+    }
+
+
+    if (
+      paidUntil < now.getTime()
+    ) {
+
+      log(
+        `skip ${shop.name}: licence expired`
+      );
+
+      continue;
+    }
+
+
+    /* SMS CONFIG */
 
     const cfgSnap =
       await shopDoc.ref
@@ -617,31 +697,46 @@ async function runReminders({
         : {};
 
 
-    if (cfg.enabled !== true) {
+    if (!cfgSnap.exists) {
 
       log(
-        `skip ${shop.name}: SMS reminders disabled`
+        `skip ${shop.name}: private/sms document missing`
       );
 
       continue;
     }
 
 
-    /* ===============================================================
-       FIX:
-       USE SHOP CREDENTIALS FIRST.
-       IF EMPTY, USE GITHUB PLATFORM CREDENTIALS.
+    if (
+      cfg.enabled !== true
+    ) {
 
-       This allows your current shop to work even though:
-         smsPlatform = false
-         private/sms userId = ""
-         private/sms apiKey = ""
-       =============================================================== */
+      log(
+        `skip ${shop.name}: private/sms enabled is not true`
+      );
+
+      continue;
+    }
+
+
+    /* ================================================================
+       SMS CREDENTIALS
+
+       Priority:
+       1. Shop-specific Notify.lk credentials
+       2. Platform GitHub Secrets
+
+       Platform credentials are allowed even when
+       smsPlatform is missing/false.
+
+       This is intentional because your current shop
+       uses the platform SMS account.
+       ================================================================ */
 
     let creds = null;
 
 
-    /* 1. Shop-specific Notify account */
+    /* SHOP ACCOUNT */
 
     if (
       cfg.userId &&
@@ -649,17 +744,26 @@ async function runReminders({
     ) {
 
       creds = {
-        userId: cfg.userId,
-        apiKey: cfg.apiKey,
+        userId:
+          cfg.userId,
+
+        apiKey:
+          cfg.apiKey,
+
         senderId:
           cfg.senderId ||
           env.NOTIFY_SENDER_ID ||
           'NotifyDEMO'
       };
+
+
+      log(
+        `${shop.name}: using shop SMS account`
+      );
     }
 
 
-    /* 2. Fallback to platform GitHub secrets */
+    /* PLATFORM ACCOUNT */
 
     else if (
       env.NOTIFY_USER_ID &&
@@ -667,6 +771,7 @@ async function runReminders({
     ) {
 
       creds = {
+
         userId:
           env.NOTIFY_USER_ID,
 
@@ -686,21 +791,22 @@ async function runReminders({
     }
 
 
-    /* 3. No credentials */
+    /* NO CREDENTIALS */
 
     else {
 
       log(
-        `skip ${shop.name}: no SMS credentials available`
+        `skip ${shop.name}: Notify.lk credentials missing`
       );
 
       continue;
     }
 
 
-    /* ---------------------------------------------------------------
-       SHOP IS NOW VALID FOR PROCESSING
-       --------------------------------------------------------------- */
+    /* SHOP READY */
+
+    summary.shops++;
+
 
     const today =
       todayIn(
@@ -710,12 +816,12 @@ async function runReminders({
       );
 
 
-    summary.shops++;
+    log(
+      `${shop.name}: processing date ${today}`
+    );
 
 
-    /* ---------------------------------------------------------------
-       GET OPEN SALES
-       --------------------------------------------------------------- */
+    /* SALES */
 
     const salesSnap =
       await shopDoc.ref
@@ -737,19 +843,23 @@ async function runReminders({
       );
 
 
-    /* ---------------------------------------------------------------
-       GET CUSTOMERS
-       --------------------------------------------------------------- */
+    log(
+      `${shop.name}: ${sales.length} open sales found`
+    );
 
-    const custIds = [
-      ...new Set(
-        sales
-          .map(
-            s => s.customerId
-          )
-          .filter(Boolean)
-      )
-    ];
+
+    /* CUSTOMERS */
+
+    const custIds =
+      [
+        ...new Set(
+          sales
+            .map(
+              s => s.customerId
+            )
+            .filter(Boolean)
+        )
+      ];
 
 
     const customers = {};
@@ -763,7 +873,10 @@ async function runReminders({
 
       const refs =
         custIds
-          .slice(i, i + 100)
+          .slice(
+            i,
+            i + 100
+          )
           .map(
             id =>
               shopDoc.ref
@@ -774,22 +887,26 @@ async function runReminders({
           );
 
 
-      (
-        await db.getAll(...refs)
-      ).forEach(d => {
+      const docs =
+        await db.getAll(
+          ...refs
+        );
 
-        if (d.exists) {
 
-          customers[d.id] =
-            d.data();
+      docs.forEach(
+        d => {
+
+          if (d.exists) {
+
+            customers[d.id] =
+              d.data();
+          }
         }
-      });
+      );
     }
 
 
-    /* ---------------------------------------------------------------
-       CREATE TODAY'S REMINDER PLAN
-       --------------------------------------------------------------- */
+    /* CREATE PLAN */
 
     const plan =
       planShop({
@@ -805,19 +922,37 @@ async function runReminders({
       plan.skipped.length;
 
 
+    log(
+      `${shop.name}: ${
+        plan.messages.length
+      } customer SMS planned`
+    );
+
+
+    if (
+      plan.skipped.length
+    ) {
+
+      plan.skipped.forEach(
+        x =>
+          log(
+            `${shop.name}: skipped ${x}`
+          )
+      );
+    }
+
+
     let sent = 0;
     let failed = 0;
 
 
-    /* ---------------------------------------------------------------
-       SEND CUSTOMER SMS
-       --------------------------------------------------------------- */
+    /* CUSTOMER SMS */
 
     for (
       const m of plan.messages
     ) {
 
-      const r =
+      const result =
         dryRun
           ? { ok: true }
           : await sendNotify(
@@ -828,19 +963,27 @@ async function runReminders({
 
 
       log(
-        `${dryRun ? '[dry] ' : ''}` +
-        `${shop.name} → ${m.to}: ` +
         `${
-          r.ok
+          dryRun
+            ? '[DRY RUN] '
+            : ''
+        }${shop.name} → ${
+          m.to
+        }: ${
+          result.ok
             ? 'OK'
-            : 'FAIL ' + r.error
+            : 'FAIL ' +
+              result.error
         }`
       );
 
 
-      if (r.ok) {
+      if (result.ok) {
+
         sent++;
+
       } else {
+
         failed++;
       }
 
@@ -851,9 +994,7 @@ async function runReminders({
           db.batch();
 
 
-        /* Save reminder key */
-
-        if (r.ok) {
+        if (result.ok) {
 
           batch.update(
             shopDoc.ref
@@ -874,8 +1015,6 @@ async function runReminders({
         }
 
 
-        /* Save SMS log */
-
         batch.set(
           shopDoc.ref
             .collection('smsLog')
@@ -885,11 +1024,14 @@ async function runReminders({
             ts: Date.now(),
             to: m.to,
             text: m.text,
-            ok: r.ok,
+            ok: result.ok,
             error:
-              r.error || null,
-            saleId: m.saleId,
-            kind: 'customer'
+              result.error ||
+              null,
+            saleId:
+              m.saleId,
+            kind:
+              'customer'
           }
         );
 
@@ -899,17 +1041,17 @@ async function runReminders({
     }
 
 
-    /* ---------------------------------------------------------------
-       OWNER DAILY ALERT
-       --------------------------------------------------------------- */
+    /* OWNER PHONE */
 
     const ownerTo =
       intlPhone(
         cfg.ownerPhone ||
-        shop.phone ||
-        shop.settings?.phone
+        shop.settings?.phone ||
+        shop.phone
       );
 
+
+    /* OWNER DAILY SUMMARY */
 
     if (
       plan.ownerText &&
@@ -917,7 +1059,7 @@ async function runReminders({
       shop.smsOwnerDay !== today
     ) {
 
-      const r =
+      const result =
         dryRun
           ? { ok: true }
           : await sendNotify(
@@ -928,20 +1070,27 @@ async function runReminders({
 
 
       log(
-        `${dryRun ? '[dry] ' : ''}` +
-        `${shop.name} owner alert → ` +
-        `${ownerTo}: ` +
         `${
-          r.ok
+          dryRun
+            ? '[DRY RUN] '
+            : ''
+        }${shop.name} owner alert → ${
+          ownerTo
+        }: ${
+          result.ok
             ? 'OK'
-            : 'FAIL ' + r.error
+            : 'FAIL ' +
+              result.error
         }`
       );
 
 
-      if (r.ok) {
+      if (result.ok) {
+
         sent++;
+
       } else {
+
         failed++;
       }
 
@@ -956,14 +1105,16 @@ async function runReminders({
             ts: Date.now(),
             to: ownerTo,
             text: plan.ownerText,
-            ok: r.ok,
+            ok: result.ok,
             error:
-              r.error || null,
-            kind: 'owner'
+              result.error ||
+              null,
+            kind:
+              'owner'
           });
 
 
-        if (r.ok) {
+        if (result.ok) {
 
           await shopDoc.ref.update({
             smsOwnerDay: today
@@ -973,9 +1124,7 @@ async function runReminders({
     }
 
 
-    /* ---------------------------------------------------------------
-       SAVE LAST RUN RESULT
-       --------------------------------------------------------------- */
+    /* SAVE RESULT */
 
     if (!dryRun) {
 
@@ -985,17 +1134,19 @@ async function runReminders({
           FieldValue.serverTimestamp(),
 
         smsLastResult:
-          `${sent} sent` +
-          (
+          `${sent} sent${
             failed
-              ? `, ${failed} failed`
+              ? ', ' +
+                failed +
+                ' failed'
               : ''
-          ) +
-          (
+          }${
             plan.skipped.length
-              ? `, ${plan.skipped.length} without mobile no.`
+              ? ', ' +
+                plan.skipped.length +
+                ' without mobile no.'
               : ''
-          )
+          }`
       });
     }
 
@@ -1005,15 +1156,16 @@ async function runReminders({
   }
 
 
-  /* ---------------------------------------------------------------------
-     FINAL RESULT
-     --------------------------------------------------------------------- */
-
   log(
-    `Done: ${summary.shops} shops, ` +
-    `${summary.sent} sent, ` +
-    `${summary.failed} failed, ` +
-    `${summary.skipped} skipped`
+    `Done: ${
+      summary.shops
+    } shops, ${
+      summary.sent
+    } sent, ${
+      summary.failed
+    } failed, ${
+      summary.skipped
+    } skipped`
   );
 
 
